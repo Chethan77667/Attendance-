@@ -2,13 +2,16 @@ import os
 import sys
 import time
 from datetime import datetime
+import io
 from queue import Queue, Empty
 
 import numpy as np
 import cv2
 import streamlit as st
+import pandas as pd
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import av
+import json
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
@@ -30,6 +33,9 @@ RTC_CONFIG = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
 
+# Persisted settings
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "database", "settings.json")
+
 
 def get_system() -> DeepFaceAttendance:
     if "system" not in st.session_state:
@@ -38,6 +44,16 @@ def get_system() -> DeepFaceAttendance:
         sys = st.session_state.system
         sys._students_mtime = _get_file_mtime(sys.data_file)
         sys._embeddings_mtime = _get_file_mtime(sys.embeddings_file)
+        # Load persisted threshold if present
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    cfg = json.load(f)
+                thr = float(cfg.get('recognition_threshold', sys.recognition_threshold))
+                if 0.1 <= thr <= 0.9:
+                    sys.recognition_threshold = thr
+        except Exception:
+            pass
     return st.session_state.system
 
 
@@ -47,7 +63,7 @@ class TakeAttendanceProcessor(VideoProcessorBase):
         self.last_ts = 0.0
         self.interval = 0.3
         self.queue = Queue(maxsize=100)
-        self.seen = set()
+        self.seen = set()  # kept for compatibility; not used to block emits
 
         # Auto-reload settings
         self.last_reload_check = 0.0
@@ -110,22 +126,21 @@ class TakeAttendanceProcessor(VideoProcessorBase):
                 if sid and conf >= self.system.recognition_threshold:
                     name = self.system.students[sid]['name']
                     self.system.log_attendance(sid, name)
-                    if sid not in self.seen:
-                        now_dt = datetime.now()
-                        item = {
-                            'student_id': sid,
-                            'name': name,
-                            'confidence': round(float(conf) * 100.0, 2),
-                            'date': now_dt.strftime('%Y-%m-%d'),
-                            'time': now_dt.strftime('%H:%M:%S')
-                        }
-                        try:
-                            if self.queue.full():
-                                _ = self.queue.get_nowait()
-                            self.queue.put_nowait(item)
-                            self.seen.add(sid)
-                        except Exception:
-                            pass
+                    # Emit a record regularly so the UI can pick it up even if it missed earlier frames
+                    now_dt = datetime.now()
+                    item = {
+                        'student_id': sid,
+                        'name': name,
+                        'confidence': round(float(conf) * 100.0, 2),
+                        'date': now_dt.strftime('%Y-%m-%d'),
+                        'time': now_dt.strftime('%H:%M:%S')
+                    }
+                    try:
+                        if self.queue.full():
+                            _ = self.queue.get_nowait()
+                        self.queue.put_nowait(item)
+                    except Exception:
+                        pass
                     self.system.draw_face_box_with_name(img, (x1, y1, x2, y2), name, conf, True)
                 else:
                     self.system.draw_face_box_with_name(img, (x1, y1, x2, y2), "Unknown", conf if 'conf' in locals() else 0.0, False)
@@ -186,6 +201,10 @@ def page_home():
         if st.button("List Students", use_container_width=True):
             st.session_state.page = 'list'
             st.rerun()
+    st.divider()
+    if st.button("Set Threshold", type="secondary"):
+        st.session_state.page = 'threshold'
+        st.rerun()
 
 
 def page_add():
@@ -273,6 +292,7 @@ def page_take():
         ctx = webrtc_streamer(key="take_attendance", video_processor_factory=TakeAttendanceProcessor, rtc_configuration=RTC_CONFIG, media_stream_constraints={"video": True, "audio": False}, async_processing=True)
     with right:
         st.subheader("Recognized Students (live)")
+        live_refresh = st.checkbox("Live refresh", value=st.session_state.get('take_live_refresh', True), key='take_live_refresh')
         if ctx and ctx.state.playing and ctx.video_processor:
             if 'take_records' not in st.session_state:
                 st.session_state.take_records = []
@@ -299,8 +319,37 @@ def page_take():
         else:
             for i, r in enumerate(recs, 1):
                 st.write(f"{i}. {r['name']} (ID: {r['student_id']})\n   Date: {r['date']}   Time: {r['time']}")
-        if st.button("Clear Recognitions"):
-            st.session_state.take_records = []
+
+            # Download buttons row
+            c1, c2 = st.columns(2)
+            with c1:
+                # Export current (unique) list to Excel
+                df = pd.DataFrame([
+                    {
+                        'Name': r.get('name', ''),
+                        'Student ID': r.get('student_id', ''),
+                        'Date': r.get('date', ''),
+                        'Time': r.get('time', ''),
+                    } for r in recs
+                ])
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    df.to_excel(writer, index=False, sheet_name="Recognized")
+                buf.seek(0)
+                st.download_button(
+                    label="Download as Excel",
+                    data=buf.getvalue(),
+                    file_name=f"recognized_students_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            with c2:
+                if st.button("Clear Recognitions"):
+                    st.session_state.take_records = []
+                    st.rerun()
+
+        # Periodically rerun to poll results from the background processor
+        if live_refresh and ctx and ctx.state.playing:
+            time.sleep(0.5)
             st.rerun()
 
 
@@ -333,6 +382,30 @@ def page_list():
         st.write(f"{i}. {data['name']} • ID: {sid} • Registered: {data.get('registration_date', 'N/A')}")
 
 
+def page_threshold():
+    system = get_system()
+    st.header("Set Recognition Threshold")
+    st.caption("Higher = stricter matching, Lower = more lenient")
+    current = float(system.recognition_threshold)
+    new_thr = st.slider("Threshold", min_value=0.10, max_value=0.90, value=float(round(current, 2)), step=0.01)
+    c1, c2 = st.columns([1,1])
+    with c1:
+        if st.button("Save", type="primary"):
+            system.recognition_threshold = float(new_thr)
+            # persist to settings file
+            try:
+                os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+                with open(SETTINGS_FILE, 'w') as f:
+                    json.dump({"recognition_threshold": system.recognition_threshold}, f, indent=2)
+                st.success(f"Saved threshold to {system.recognition_threshold:.2f}")
+            except Exception as e:
+                st.error(f"Failed to save settings: {e}")
+    with c2:
+        if st.button("Back"):
+            st.session_state.page = 'home'
+            st.rerun()
+
+
 def main():
     st.set_page_config(page_title="Face Attendance", layout="wide")
     if 'page' not in st.session_state:
@@ -352,6 +425,8 @@ def main():
         page_delete()
     elif page == 'list':
         page_list()
+    elif page == 'threshold':
+        page_threshold()
 
 
 if __name__ == "__main__":

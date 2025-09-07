@@ -9,7 +9,7 @@ from main import DeepFaceAttendance
 import json
 
 class AttendanceGUI:
-    def __init__(self, master=None):\\
+    def __init__(self, master=None):
     
         self.master = master or tk.Tk()
         self.master.title("Face Recognition Attendance System")
