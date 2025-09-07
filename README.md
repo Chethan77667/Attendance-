@@ -36,6 +36,9 @@ cd attendence
 ```bash
 pip install -r requirements.txt
 ```
+Notes:
+- If you have issues with `dlib` or GPU packages, install CPU-only first. InsightFace and Torch are optional; the system falls back to OpenCV if not available.
+- On Windows, you might need Visual Studio Build Tools for `dlib`. If binaries are available for your Python version: `pip install dlib==19.24.2 --only-binary :all:`
 
 ### 3. Download AI Models (Optional but Recommended)
 ```bash
@@ -68,11 +71,17 @@ python attendance_system/gui.py
 ```
 Provides a graphical user interface for easy interaction.
 
-### Method 4: Web Interface
+### Method 4: Streamlit Web Interface (Recommended)
+```bash
+streamlit run web_app.py
+```
+Opens the Streamlit web app with camera-based Add, Take Attendance, Delete, and List pages.
+
+### Method 5: Legacy Flask App (Optional)
 ```bash
 python attendance_system/app.py
 ```
-Runs a Flask web server (requires additional setup).
+Runs a legacy Flask server (limited compared to Streamlit app).
 
 ## 📁 Project Structure
 
@@ -109,11 +118,8 @@ attendence/
 ## 📊 Usage Guide
 
 ### 1. Adding Students
-1. Run the registration system
-2. Enter student ID and name
-3. Position face in camera view
-4. System captures multiple face samples
-5. Face embeddings are generated and stored
+- Streamlit: Go to Add Student, enter ID and Name, click Submit to open camera, align your face, then click Capture & Save.
+- CLI: Use the menu in `python main.py` and follow prompts.
 
 ### 2. Taking Attendance
 1. Run the recognition system

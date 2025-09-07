@@ -1,61 +1,21 @@
-# Face Recognition Attendance System - Complete Requirements
-# All dependencies for basic, web, and ensemble functionality
-
-# Computer Vision
-opencv-python>=4.8.0
-opencv-contrib-python>=4.8.0
-
-# Deep Learning & AI Models
+opencv-python==4.9.0.80
+opencv-contrib-python==4.9.0.80
+numpy==2.1.3
+pandas==2.1.4
+scikit-learn==1.4.0
+Pillow==10.2.0
+onnxruntime==1.17.1
+tqdm==4.66.1
+requests==2.31.0
+matplotlib==3.8.2
+openpyxl==3.1.2
+streamlit==1.36.0
+streamlit-webrtc==0.47.6
+av==10.0.0
+aiortc==1.6.0
+pyttsx3==2.90
+insightface==0.7.3
 torch>=2.0.0
 torchvision>=0.15.0
-onnxruntime>=1.15.0
-insightface>=0.7.3
-
-# Face Recognition Libraries
-face-recognition>=1.3.0
-dlib>=19.24.0
-
-# Image Processing
-Pillow>=10.0.0
-numpy>=1.24.0
-scipy>=1.11.0
-
-# Machine Learning
-scikit-learn>=1.3.0
-scikit-image>=0.21.0
-
-# Data Handling
-pandas>=2.0.0
-openpyxl>=3.1.0
-
-# Web Framework (optional - remove if not using any web server)
-# flask>=2.3.0
-# flask-cors>=4.0.0
-# flask-socketio>=5.3.0
-
-# Streamlit Web UI
-streamlit>=1.31.0
-streamlit-webrtc>=0.47.6
-av>=10.0.0
-aiortc>=1.6.0
-
-# Audio & Text-to-Speech
-pyttsx3>=2.90
-
-# Utilities
-tqdm>=4.65.0
-psutil>=5.9.0
-requests>=2.25.0
-matplotlib>=3.3.0
-
-# Optional: GPU Acceleration (uncomment if you have CUDA GPU)
-# torch>=2.0.0+cu118 --index-url https://download.pytorch.org/whl/cu118
-# torchvision>=0.15.0+cu118 --index-url https://download.pytorch.org/whl/cu118
-
-# Optional: Development & Testing (uncomment for development)
-# pytest>=7.4.0
-# flake8>=6.0.0
-# black>=23.0.0
-
-# Optional: Cloud Integration (uncomment if needed)
-# firebase-admin>=5.0.0 
+dlib==19.24.2
+Flask==3.0.3

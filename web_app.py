@@ -36,25 +36,51 @@ RTC_CONFIG = RTCConfiguration({
 # Persisted settings
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "database", "settings.json")
 
+# Global system instance to be used by worker threads (no SessionState there)
+GLOBAL_SYSTEM = None
+
 
 def get_system() -> DeepFaceAttendance:
-    if "system" not in st.session_state:
-        st.session_state.system = DeepFaceAttendance()
-        # Track file mtimes for automatic reloads across pages/processors
-        sys = st.session_state.system
-        sys._students_mtime = _get_file_mtime(sys.data_file)
-        sys._embeddings_mtime = _get_file_mtime(sys.embeddings_file)
-        # Load persisted threshold if present
-        try:
-            if os.path.exists(SETTINGS_FILE):
-                with open(SETTINGS_FILE, 'r') as f:
-                    cfg = json.load(f)
-                thr = float(cfg.get('recognition_threshold', sys.recognition_threshold))
-                if 0.1 <= thr <= 0.9:
-                    sys.recognition_threshold = thr
-        except Exception:
-            pass
-    return st.session_state.system
+    """Return the shared system.
+
+    - In UI thread: read/write st.session_state.system
+    - In worker thread: use GLOBAL_SYSTEM (no ScriptRunContext there)
+    """
+    global GLOBAL_SYSTEM
+    try:
+        if "system" not in st.session_state:
+            # If UI thread calls first time, create and persist to both places
+            sys_inst = DeepFaceAttendance()
+            # Track file mtimes for automatic reloads across pages/processors
+            sys_inst._students_mtime = _get_file_mtime(sys_inst.data_file)
+            sys_inst._embeddings_mtime = _get_file_mtime(sys_inst.embeddings_file)
+            # Load persisted threshold if present
+            try:
+                if os.path.exists(SETTINGS_FILE):
+                    with open(SETTINGS_FILE, 'r') as f:
+                        cfg = json.load(f)
+                    thr = float(cfg.get('recognition_threshold', sys_inst.recognition_threshold))
+                    if 0.1 <= thr <= 0.9:
+                        sys_inst.recognition_threshold = thr
+            except Exception:
+                pass
+            st.session_state.system = sys_inst
+            GLOBAL_SYSTEM = sys_inst
+        else:
+            # Keep GLOBAL_SYSTEM in sync in case workers need it
+            if GLOBAL_SYSTEM is None:
+                GLOBAL_SYSTEM = st.session_state.system
+        return st.session_state.system
+    except Exception:
+        # Worker thread path
+        if GLOBAL_SYSTEM is None:
+            GLOBAL_SYSTEM = DeepFaceAttendance()
+            try:
+                GLOBAL_SYSTEM._students_mtime = _get_file_mtime(GLOBAL_SYSTEM.data_file)
+                GLOBAL_SYSTEM._embeddings_mtime = _get_file_mtime(GLOBAL_SYSTEM.embeddings_file)
+            except Exception:
+                pass
+        return GLOBAL_SYSTEM
 
 
 class TakeAttendanceProcessor(VideoProcessorBase):
@@ -212,7 +238,7 @@ def page_add():
     st.header("Add Student")
     sid = st.text_input("Student ID")
     name = st.text_input("Student Name")
-    st.caption("Submit to open the camera, auto-capture one face, and save.")
+    st.caption("Submit to open the camera. Then click Capture & Save to store the face.")
 
     # Show success toast/message from last save (after camera stops)
     success_msg = st.session_state.get('add_success_msg')
@@ -225,8 +251,8 @@ def page_add():
         # Clear after showing once
         st.session_state.add_success_msg = None
 
-    # Begin auto flow on submit
-    if st.button("Submit & Auto-Capture", type="primary"):
+    # Begin flow on submit: open camera (manual capture later)
+    if st.button("Submit", type="primary"):
         if not sid or not name:
             st.error("Enter Student ID and Name")
         elif sid in system.students:
@@ -240,7 +266,7 @@ def page_add():
 
     add_ctx = None
     if st.session_state.get('add_active', False):
-        st.info("Align your face in the frame. Saving automatically...")
+        st.info("Align your face in the frame, then click Capture & Save when ready.")
         add_ctx = webrtc_streamer(
             key="add_auto",
             video_processor_factory=AddStudentProcessor,
@@ -248,39 +274,55 @@ def page_add():
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True,
         )
-
-        # Pull the most recent embedding and save once
+        # Manual capture: user clicks to save current face
         if add_ctx and add_ctx.state.playing and add_ctx.video_processor and not st.session_state.get('add_saved', False):
-            latest = None
-            try:
-                while True:
-                    latest = add_ctx.video_processor.queue.get_nowait()
-            except Empty:
-                pass
-            if latest is not None:
-                emb = latest.get('embedding')
-                sid_p = st.session_state.get('add_sid')
-                name_p = st.session_state.get('add_name')
-                if emb is not None and sid_p and name_p and sid_p not in system.students:
-                    ts = datetime.now().isoformat()
-                    emb_list = emb.tolist() if isinstance(emb, np.ndarray) else list(emb)
-                    system.students[sid_p] = {'name': name_p, 'registration_date': ts}
-                    system.embeddings[sid_p] = {
-                        'name': name_p,
-                        'embeddings': [{'vector': emb_list, 'timestamp': ts, 'confidence': 1.0, 'uniqueness': 1.0}],
-                        'embedding': emb_list,
-                        'registration_date': ts,
-                        'diversity_score': 1/system.max_embeddings
-                    }
-                    system.save_data()
-                    st.session_state.add_saved = True
-                    # Defer message to after rerun so the camera is stopped
-                    st.session_state.add_success_msg = f"Saved {name_p} ({sid_p}) successfully."
-                    # stop stream and rerun to show popup
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Capture & Save", type="primary"):
+                    latest = None
+                    try:
+                        while True:
+                            latest = add_ctx.video_processor.queue.get_nowait()
+                    except Empty:
+                        pass
+                    emb = latest.get('embedding') if latest else None
+                    sid_p = st.session_state.get('add_sid')
+                    name_p = st.session_state.get('add_name')
+                    if not sid_p or not name_p:
+                        st.error("Missing Student ID or Name. Please restart the add flow.")
+                    elif sid_p in system.students:
+                        st.warning("Student already exists")
+                    elif emb is None:
+                        st.error("No face detected yet. Please align your face and try again.")
+                    else:
+                        ts = datetime.now().isoformat()
+                        emb_list = emb.tolist() if isinstance(emb, np.ndarray) else list(emb)
+                        system.students[sid_p] = {'name': name_p, 'registration_date': ts}
+                        system.embeddings[sid_p] = {
+                            'name': name_p,
+                            'embeddings': [{'vector': emb_list, 'timestamp': ts, 'confidence': 1.0, 'uniqueness': 1.0}],
+                            'embedding': emb_list,
+                            'registration_date': ts,
+                            'diversity_score': 1/system.max_embeddings
+                        }
+                        system.save_data()
+                        st.session_state.add_saved = True
+                        st.session_state.add_success_msg = f"Saved {name_p} ({sid_p}) successfully."
+                        st.session_state.add_active = False
+                        st.rerun()
+            with c2:
+                if st.button("Cancel"):
                     st.session_state.add_active = False
                     st.rerun()
     else:
-        st.info("Fill details and press Submit & Auto-Capture.")
+        st.info("Fill details and press Submit to open the camera.")
+
+    st.divider()
+    if st.button("Back"):
+        # Ensure camera stops if active
+        st.session_state.add_active = False
+        st.session_state.page = 'home'
+        st.rerun()
 
 
 def page_take():
@@ -347,6 +389,11 @@ def page_take():
                     st.session_state.take_records = []
                     st.rerun()
 
+        st.divider()
+        if st.button("Back"):
+            st.session_state.page = 'home'
+            st.rerun()
+
         # Periodically rerun to poll results from the background processor
         if live_refresh and ctx and ctx.state.playing:
             time.sleep(0.5)
@@ -358,6 +405,9 @@ def page_delete():
     st.header("Delete Student")
     if not system.students:
         st.info("No students registered")
+        if st.button("Back"):
+            st.session_state.page = 'home'
+            st.rerun()
         return
     options = [f"{data['name']} (ID: {sid})" for sid, data in system.students.items()]
     choice = st.selectbox("Select", options)
@@ -370,16 +420,29 @@ def page_delete():
         system.save_data()
         st.success("Deleted")
 
+    st.divider()
+    if st.button("Back"):
+        st.session_state.page = 'home'
+        st.rerun()
+
 
 def page_list():
     system = get_system()
     st.header("List Students")
     if not system.students:
         st.info("No students registered")
+        if st.button("Back"):
+            st.session_state.page = 'home'
+            st.rerun()
         return
     st.write(f"Total: {len(system.students)}")
     for i, (sid, data) in enumerate(system.students.items(), 1):
         st.write(f"{i}. {data['name']} • ID: {sid} • Registered: {data.get('registration_date', 'N/A')}")
+
+    st.divider()
+    if st.button("Back"):
+        st.session_state.page = 'home'
+        st.rerun()
 
 
 def page_threshold():
@@ -406,6 +469,18 @@ def page_threshold():
             st.rerun()
 
 
+def show_footer():
+    """Display footer on all pages."""
+    st.markdown("---")
+    st.markdown(
+        """
+        <div style='text-align: center; padding: 20px; color: #666; font-size: 14px;'>
+            Made with ❤️ by Technical Team
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
+
 def main():
     st.set_page_config(page_title="Face Attendance", layout="wide")
     if 'page' not in st.session_state:
@@ -427,6 +502,9 @@ def main():
         page_list()
     elif page == 'threshold':
         page_threshold()
+    
+    # Add footer to all pages
+    show_footer()
 
 
 if __name__ == "__main__":
