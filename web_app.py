@@ -17,6 +17,15 @@ if CURRENT_DIR not in sys.path:
 from main import DeepFaceAttendance  # noqa: E402
 
 
+# --- Helpers for auto-reloading data when files change ---
+def _get_file_mtime(path: str) -> float:
+    """Return last modified time for a file or 0.0 if missing."""
+    try:
+        return os.path.getmtime(path) if os.path.exists(path) else 0.0
+    except Exception:
+        return 0.0
+
+
 RTC_CONFIG = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
@@ -25,6 +34,10 @@ RTC_CONFIG = RTCConfiguration({
 def get_system() -> DeepFaceAttendance:
     if "system" not in st.session_state:
         st.session_state.system = DeepFaceAttendance()
+        # Track file mtimes for automatic reloads across pages/processors
+        sys = st.session_state.system
+        sys._students_mtime = _get_file_mtime(sys.data_file)
+        sys._embeddings_mtime = _get_file_mtime(sys.embeddings_file)
     return st.session_state.system
 
 
@@ -36,8 +49,53 @@ class TakeAttendanceProcessor(VideoProcessorBase):
         self.queue = Queue(maxsize=100)
         self.seen = set()
 
+        # Auto-reload settings
+        self.last_reload_check = 0.0
+        self.reload_check_interval = 1.5  # seconds
+
+    def _maybe_reload_system(self) -> None:
+        """Reload students/embeddings if their files changed while running.
+
+        This allows immediate reflection of adds/deletes without restarting.
+        """
+        now = time.time()
+        if now - self.last_reload_check < self.reload_check_interval:
+            return
+        self.last_reload_check = now
+
+        sys = self.system
+        try:
+            students_mtime = _get_file_mtime(sys.data_file)
+            embeddings_mtime = _get_file_mtime(sys.embeddings_file)
+
+            changed = (
+                students_mtime != getattr(sys, "_students_mtime", 0.0)
+                or embeddings_mtime != getattr(sys, "_embeddings_mtime", 0.0)
+            )
+            if changed:
+                sys.load_data()
+                sys._students_mtime = students_mtime
+                sys._embeddings_mtime = embeddings_mtime
+                # Clear session caches so UI reflects changes instantly
+                self.seen.clear()
+                # Also clear pending items referencing deleted students
+                try:
+                    while not self.queue.empty():
+                        item = self.queue.get_nowait()
+                        if item and item.get("student_id") in sys.students:
+                            # push back valid items (best-effort)
+                            self.queue.put_nowait(item)
+                            break
+                except Exception:
+                    pass
+        except Exception:
+            # Non-fatal; continue processing frames
+            pass
+
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
+        # Apply hot-reload check
+        self._maybe_reload_system()
         now = time.time()
         faces = self.system.detect_faces(img)
         if now - self.last_ts >= self.interval:
@@ -208,6 +266,7 @@ def page_add():
 
 def page_take():
     st.header("Take Attendance")
+    system = get_system()
     st.caption("Live camera on left, recognized on right")
     left, right = st.columns([7, 5])
     with left:
@@ -224,11 +283,22 @@ def page_take():
             except Empty:
                 pass
         recs = st.session_state.get('take_records', [])
+        # Auto-filter out entries for students that were deleted after recognition
+        if recs:
+            recs = [r for r in recs if r.get('student_id') in system.students]
+            # Keep only the first seen entry per student (unique by ID)
+            unique = {}
+            for r in recs:
+                sid = r.get('student_id')
+                if sid and sid not in unique:
+                    unique[sid] = r
+            recs = list(unique.values())
+            st.session_state.take_records = recs
         if not recs:
             st.caption("No one recognized yet.")
         else:
             for i, r in enumerate(recs, 1):
-                st.write(f"{i}. {r['name']} (ID: {r['student_id']}) — {r['confidence']:.2f}%\n   Date: {r['date']}   Time: {r['time']}")
+                st.write(f"{i}. {r['name']} (ID: {r['student_id']})\n   Date: {r['date']}   Time: {r['time']}")
         if st.button("Clear Recognitions"):
             st.session_state.take_records = []
             st.rerun()

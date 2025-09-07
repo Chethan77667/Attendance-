@@ -202,7 +202,7 @@ class DeepFaceAttendance:
         return best_match, best_score
 
     def draw_face_box_with_name(self, frame, bbox, name, confidence, is_recognized=True):
-        """Draw face box with name and confidence"""
+        """Draw face box with name only (no confidence shown on overlay)."""
         x1, y1, x2, y2 = bbox
         
         # Choose color based on recognition status
@@ -216,8 +216,8 @@ class DeepFaceAttendance:
         # Draw rectangle around face
         cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
         
-        # Draw filled background for text
-        text = f"{name} ({confidence:.1%})"
+        # Draw filled background for text (name only)
+        text = f"{name}"
         (text_width, text_height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
         
         # Background rectangle for text
