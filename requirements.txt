@@ -28,10 +28,16 @@ scikit-image>=0.21.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 
-# Web Framework (for web interface)
-flask>=2.3.0
-flask-cors>=4.0.0
-flask-socketio>=5.3.0
+# Web Framework (optional - remove if not using any web server)
+# flask>=2.3.0
+# flask-cors>=4.0.0
+# flask-socketio>=5.3.0
+
+# Streamlit Web UI
+streamlit>=1.31.0
+streamlit-webrtc>=0.47.6
+av>=10.0.0
+aiortc>=1.6.0
 
 # Audio & Text-to-Speech
 pyttsx3>=2.90

@@ -9,8 +9,13 @@ import requests
 from tqdm import tqdm
 import zipfile
 import tarfile
-import insightface
-from insightface.app import FaceAnalysis
+try:
+    import insightface
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_AVAILABLE = True
+except ImportError:
+    INSIGHTFACE_AVAILABLE = False
+    print("⚠️ InsightFace not available - using OpenCV DNN models only")
 import urllib.request
 
 from attendance_system.config.settings import MODEL_DIR
@@ -60,6 +65,10 @@ def download_file(url, target_path, description=None):
 def download_insightface_models():
     """Download InsightFace models."""
     print("\nDownloading InsightFace models...")
+    
+    if not INSIGHTFACE_AVAILABLE:
+        print("⚠️ InsightFace not available - skipping InsightFace models")
+        return False
     
     try:
         # Initialize FaceAnalysis to trigger the download

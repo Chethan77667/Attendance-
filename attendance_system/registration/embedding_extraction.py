@@ -7,8 +7,13 @@ import os
 import time
 from typing import List, Tuple, Dict, Optional, Union
 import onnxruntime as ort
-import insightface
-from insightface.app import FaceAnalysis
+try:
+    import insightface
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_AVAILABLE = True
+except ImportError:
+    INSIGHTFACE_AVAILABLE = False
+    print("⚠️ InsightFace not available - falling back to OpenCV DNN")
 from ..config.settings import (
     FACE_RECOGNITION_SIZE, FACE_CONFIDENCE_THRESHOLD,
     MODEL_DIR, USE_GPU
@@ -30,16 +35,28 @@ class FaceEmbeddingExtractor:
         
         Args:
             model_name (str): Name of the face recognition model to use
-                              Options: "arcface", "facenet", "mobilefacenet"
+                              Options: "arcface", "facenet", "mobilefacenet", "opencv_simple"
         """
-        self.model_name = model_name
-        self.model_config = MODELS.get(model_name)
+        # Switch to simple OpenCV-based embeddings if InsightFace not available and trying to use arcface
+        if model_name == "arcface" and not INSIGHTFACE_AVAILABLE:
+            print("⚠️ Switching to OpenCV simple embeddings (InsightFace not available)")
+            model_name = "opencv_simple"
         
-        if not self.model_config:
-            raise ValueError(f"Model {model_name} not supported")
+        self.model_name = model_name
+        
+        # Handle opencv_simple model (doesn't need external files)
+        if model_name == "opencv_simple":
+            self.model_config = {
+                "size": (64, 64),
+                "embedding_size": 4096  # 64*64 flattened
+            }
+        else:
+            self.model_config = MODELS.get(model_name)
+            if not self.model_config:
+                raise ValueError(f"Model {model_name} not supported")
         
         # Get model parameters
-        self.model_file = self.model_config["model_file"]
+        self.model_file = self.model_config.get("model_file", None)
         self.input_size = self.model_config.get("size", FACE_RECOGNITION_SIZE)
         self.embedding_size = self.model_config.get("embedding_size", 512)
         
@@ -54,6 +71,11 @@ class FaceEmbeddingExtractor:
     
     def _load_model(self):
         """Load the face recognition model."""
+        if self.model_name == "opencv_simple":
+            # No external model file needed for simple OpenCV embeddings
+            print("Using simple OpenCV-based face embeddings")
+            return
+        
         # Check if model exists
         if not os.path.exists(self.model_file):
             os.makedirs(os.path.dirname(self.model_file), exist_ok=True)
@@ -68,6 +90,10 @@ class FaceEmbeddingExtractor:
     
     def _load_insightface_model(self):
         """Load the InsightFace model."""
+        if not INSIGHTFACE_AVAILABLE:
+            print("⚠️ InsightFace not available - cannot load InsightFace model")
+            raise ImportError("InsightFace not available")
+        
         try:
             # Initialize FaceAnalysis app
             self.app = FaceAnalysis(name="buffalo_l", providers=['CPUExecutionProvider'])
@@ -150,6 +176,8 @@ class FaceEmbeddingExtractor:
         # Extract embedding based on model type
         if self.model_name == "arcface":
             return self._extract_insightface_embedding(face_image)
+        elif self.model_name == "opencv_simple":
+            return self._extract_opencv_simple_embedding(face_image)
         else:
             return self._extract_onnx_embedding(preprocessed_face)
     
@@ -208,6 +236,39 @@ class FaceEmbeddingExtractor:
             return embedding
         except Exception as e:
             print(f"Error extracting ONNX embedding: {e}")
+            return np.zeros(self.embedding_size)
+    
+    def _extract_opencv_simple_embedding(self, face_image: np.ndarray) -> np.ndarray:
+        """
+        Extract embedding using simple OpenCV operations (fallback method).
+        
+        Args:
+            face_image (numpy.ndarray): Input face image
+        
+        Returns:
+            numpy.ndarray: Face embedding vector
+        """
+        try:
+            # Resize to standard size
+            resized_face = cv2.resize(face_image, self.input_size)
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(resized_face, cv2.COLOR_BGR2GRAY)
+            
+            # Normalize
+            normalized = gray.astype(np.float32) / 255.0
+            
+            # Flatten to create embedding
+            embedding = normalized.flatten()
+            
+            # Normalize embedding
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            
+            return embedding
+        except Exception as e:
+            print(f"Error extracting OpenCV simple embedding: {e}")
             return np.zeros(self.embedding_size)
     
     def extract_embeddings_batch(self, face_images: List[np.ndarray]) -> List[np.ndarray]:
@@ -275,6 +336,11 @@ class FaceDetector:
             model_name (str): Name of the face detection model to use
                              Options: "retinaface", "opencv_dnn"
         """
+        # Automatically switch to OpenCV DNN if InsightFace is not available
+        if model_name == "retinaface" and not INSIGHTFACE_AVAILABLE:
+            print("⚠️ Switching to OpenCV DNN face detector (InsightFace not available)")
+            model_name = "opencv_dnn"
+        
         self.model_name = model_name
         self.model_config = MODELS.get(model_name)
         self.app = None
@@ -288,6 +354,10 @@ class FaceDetector:
     def _load_detector(self):
         """Load the face detection model."""
         if self.model_name == "retinaface":
+            if not INSIGHTFACE_AVAILABLE:
+                print("⚠️ InsightFace not available - cannot load RetinaFace detector")
+                raise ImportError("InsightFace not available for RetinaFace")
+            
             try:
                 # Initialize FaceAnalysis app for detection only
                 self.app = FaceAnalysis(name="buffalo_l", providers=['CPUExecutionProvider'])

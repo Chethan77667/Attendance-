@@ -10,8 +10,13 @@ import os
 import json
 import time
 from datetime import datetime
-import insightface
-from insightface.app import FaceAnalysis
+try:
+    import insightface
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_AVAILABLE = True
+except ImportError:
+    INSIGHTFACE_AVAILABLE = False
+    print("⚠️ InsightFace not available - using OpenCV DNN only")
 
 class DeepFaceAttendance:
     def __init__(self):
@@ -25,12 +30,16 @@ class DeepFaceAttendance:
         os.makedirs(self.attendance_dir, exist_ok=True)
         
         # Initialize InsightFace (DeepFace-like)
-        try:
-            self.face_analyzer = FaceAnalysis(providers=['CPUExecutionProvider'])
-            self.face_analyzer.prepare(ctx_id=0, det_size=(640, 640))
-            print("✅ InsightFace (DeepFace) loaded successfully")
-        except Exception as e:
-            print(f"❌ InsightFace failed: {e}")
+        if INSIGHTFACE_AVAILABLE:
+            try:
+                self.face_analyzer = FaceAnalysis(providers=['CPUExecutionProvider'])
+                self.face_analyzer.prepare(ctx_id=0, det_size=(640, 640))
+                print("✅ InsightFace (DeepFace) loaded successfully")
+            except Exception as e:
+                print(f"❌ InsightFace failed: {e}")
+                self.face_analyzer = None
+        else:
+            print("⚠️ InsightFace not available - using OpenCV fallback")
             self.face_analyzer = None
         
         # Fallback face detector
@@ -107,21 +116,42 @@ class DeepFaceAttendance:
         return faces
 
     def extract_embedding(self, face_img):
-        """Extract embedding using InsightFace"""
-        if not self.face_analyzer:
-            return None
+        """Extract embedding using InsightFace or OpenCV fallback"""
+        # Try InsightFace first if available
+        if self.face_analyzer:
+            try:
+                # Resize for InsightFace
+                face_resized = cv2.resize(face_img, (112, 112))
+                faces = self.face_analyzer.get(face_resized)
+                
+                if faces and hasattr(faces[0], 'embedding'):
+                    return faces[0].embedding
+            except:
+                pass
         
+        # Fallback to simple OpenCV embedding
         try:
-            # Resize for InsightFace
-            face_resized = cv2.resize(face_img, (112, 112))
-            faces = self.face_analyzer.get(face_resized)
+            # Resize to standard size
+            face_resized = cv2.resize(face_img, (64, 64))
             
-            if faces and hasattr(faces[0], 'embedding'):
-                return faces[0].embedding
-        except:
-            pass
-        
-        return None
+            # Convert to grayscale
+            gray = cv2.cvtColor(face_resized, cv2.COLOR_BGR2GRAY)
+            
+            # Normalize
+            normalized = gray.astype(np.float32) / 255.0
+            
+            # Flatten to create embedding
+            embedding = normalized.flatten()
+            
+            # Normalize embedding
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            
+            return embedding
+        except Exception as e:
+            print(f"Error extracting embedding: {e}")
+            return None
 
     def calculate_similarity(self, emb1, emb2):
         """Calculate cosine similarity"""

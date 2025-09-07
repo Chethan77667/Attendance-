@@ -11,8 +11,13 @@ import time
 from datetime import datetime
 import threading
 from collections import deque
-import insightface
-from insightface.app import FaceAnalysis
+try:
+    import insightface
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_AVAILABLE = True
+except ImportError:
+    INSIGHTFACE_AVAILABLE = False
+    print("⚠️ InsightFace not available - using OpenCV DNN only")
 import onnxruntime
 
 class AdvancedFaceRecognition:
@@ -21,13 +26,17 @@ class AdvancedFaceRecognition:
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         
         # Initialize InsightFace
-        try:
-            self.face_analyzer = FaceAnalysis(providers=['CPUExecutionProvider'])
-            self.face_analyzer.prepare(ctx_id=0, det_size=(320, 320))
-            self.use_insightface = True
-            print("✅ InsightFace initialized successfully")
-        except Exception as e:
-            print(f"⚠️ InsightFace initialization failed: {e}")
+        if INSIGHTFACE_AVAILABLE:
+            try:
+                self.face_analyzer = FaceAnalysis(providers=['CPUExecutionProvider'])
+                self.face_analyzer.prepare(ctx_id=0, det_size=(320, 320))
+                self.use_insightface = True
+                print("✅ InsightFace initialized successfully")
+            except Exception as e:
+                print(f"⚠️ InsightFace initialization failed: {e}")
+                self.use_insightface = False
+        else:
+            print("⚠️ InsightFace not available - skipping InsightFace initialization")
             self.use_insightface = False
         
         # Performance optimizations

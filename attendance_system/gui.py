@@ -6,9 +6,11 @@ import os
 import time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from main import DeepFaceAttendance
+import json
 
 class AttendanceGUI:
-    def __init__(self, master=None):
+    def __init__(self, master=None):\\
+    
         self.master = master or tk.Tk()
         self.master.title("Face Recognition Attendance System")
         self.master.geometry("400x400")
@@ -256,7 +258,23 @@ class AttendanceGUI:
             messagebox.showerror("Error", str(e))
 
     def list_students(self):
+        # Always reload from disk to reflect changes from other UIs (e.g., Streamlit)
+        try:
+            self.system.load_data()
+        except Exception:
+            pass
+
         students = self.system.students
+        # Fallback: if in-memory is empty, read the JSON directly
+        if not students:
+            try:
+                base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+                data_file = os.path.join(base_dir, 'database', 'students_deepface.json')
+                if os.path.exists(data_file):
+                    with open(data_file, 'r') as f:
+                        students = json.load(f)
+            except Exception:
+                pass
         if not students:
             messagebox.showinfo("List Students", "No students registered.")
             return

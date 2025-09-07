@@ -11,8 +11,13 @@ import time
 from typing import Dict, List, Tuple, Optional
 import logging
 from datetime import datetime
-import insightface
-from insightface.app import FaceAnalysis
+try:
+    import insightface
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_AVAILABLE = True
+except ImportError:
+    INSIGHTFACE_AVAILABLE = False
+    print("⚠️ InsightFace not available - using OpenCV DNN only")
 import onnxruntime as ort
 
 # Configure logging

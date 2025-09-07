@@ -11,20 +11,29 @@ import time
 from datetime import datetime
 import threading
 from collections import deque
-import insightface
-from insightface.app import FaceAnalysis
+try:
+    import insightface
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_AVAILABLE = True
+except ImportError:
+    INSIGHTFACE_AVAILABLE = False
+    print("⚠️ InsightFace not available - using OpenCV DNN only")
 import onnxruntime
 
 class OptimizedFaceRecognition:
     def __init__(self):
         # Initialize InsightFace with optimized settings
-        try:
-            self.face_analyzer = FaceAnalysis(providers=['CPUExecutionProvider'])
-            self.face_analyzer.prepare(ctx_id=0, det_size=(320, 320))
-            self.use_insightface = True
-            print("✅ InsightFace initialized successfully")
-        except Exception as e:
-            print(f"⚠️ InsightFace initialization failed: {e}")
+        if INSIGHTFACE_AVAILABLE:
+            try:
+                self.face_analyzer = FaceAnalysis(providers=['CPUExecutionProvider'])
+                self.face_analyzer.prepare(ctx_id=0, det_size=(320, 320))
+                self.use_insightface = True
+                print("✅ InsightFace initialized successfully")
+            except Exception as e:
+                print(f"⚠️ InsightFace initialization failed: {e}")
+                self.use_insightface = False
+        else:
+            print("⚠️ InsightFace not available - skipping InsightFace initialization")
             self.use_insightface = False
         
         # Initialize OpenCV DNN face detector
