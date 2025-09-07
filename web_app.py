@@ -87,13 +87,18 @@ class TakeAttendanceProcessor(VideoProcessorBase):
     def __init__(self):
         self.system = get_system()
         self.last_ts = 0.0
-        self.interval = 0.3
+        self.interval = 0.5  # Increased interval to reduce processing load
         self.queue = Queue(maxsize=100)
         self.seen = set()  # kept for compatibility; not used to block emits
-
+        
+        # Performance optimization settings
+        self.frame_skip = 2  # Process every 2nd frame to reduce load
+        self.frame_count = 0
+        self.max_processing_time = 0.1  # Max time per frame in seconds
+        
         # Auto-reload settings
         self.last_reload_check = 0.0
-        self.reload_check_interval = 1.5  # seconds
+        self.reload_check_interval = 2.0  # Increased interval
 
     def _maybe_reload_system(self) -> None:
         """Reload students/embeddings if their files changed while running.
@@ -135,42 +140,80 @@ class TakeAttendanceProcessor(VideoProcessorBase):
             pass
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        start_time = time.time()
         img = frame.to_ndarray(format="bgr24")
-        # Apply hot-reload check
+        
+        # Skip frames to reduce processing load
+        self.frame_count += 1
+        if self.frame_count % self.frame_skip != 0:
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+        
+        # Apply hot-reload check (less frequently)
         self._maybe_reload_system()
+        
         now = time.time()
-        faces = self.system.detect_faces(img)
         if now - self.last_ts >= self.interval:
-            for f in faces:
-                x1, y1, x2, y2 = f['bbox']
-                emb = f.get('embedding')
-                if emb is None:
-                    face_img = img[y1:y2, x1:x2]
-                    if face_img.size > 0:
-                        emb = self.system.extract_embedding(face_img)
-                sid, conf = self.system.recognize_face(emb)
-                if sid and conf >= self.system.recognition_threshold:
-                    name = self.system.students[sid]['name']
-                    self.system.log_attendance(sid, name)
-                    # Emit a record regularly so the UI can pick it up even if it missed earlier frames
-                    now_dt = datetime.now()
-                    item = {
-                        'student_id': sid,
-                        'name': name,
-                        'confidence': round(float(conf) * 100.0, 2),
-                        'date': now_dt.strftime('%Y-%m-%d'),
-                        'time': now_dt.strftime('%H:%M:%S')
-                    }
-                    try:
-                        if self.queue.full():
-                            _ = self.queue.get_nowait()
-                        self.queue.put_nowait(item)
-                    except Exception:
-                        pass
-                    self.system.draw_face_box_with_name(img, (x1, y1, x2, y2), name, conf, True)
-                else:
-                    self.system.draw_face_box_with_name(img, (x1, y1, x2, y2), "Unknown", conf if 'conf' in locals() else 0.0, False)
-            self.last_ts = now
+            try:
+                # Time-limited face detection
+                faces = self.system.detect_faces(img)
+                
+                # Process faces with timeout protection
+                for f in faces:
+                    # Check if we're taking too long
+                    if time.time() - start_time > self.max_processing_time:
+                        break
+                        
+                    x1, y1, x2, y2 = f['bbox']
+                    emb = f.get('embedding')
+                    
+                    # Extract embedding if not available (with timeout)
+                    if emb is None:
+                        face_img = img[y1:y2, x1:x2]
+                        if face_img.size > 0:
+                            try:
+                                emb = self.system.extract_embedding(face_img)
+                            except Exception:
+                                emb = None
+                    
+                    # Recognize face (with timeout protection)
+                    if emb is not None:
+                        try:
+                            sid, conf = self.system.recognize_face(emb)
+                            if sid and conf >= self.system.recognition_threshold:
+                                name = self.system.students[sid]['name']
+                                self.system.log_attendance(sid, name)
+                                
+                                # Emit recognition result
+                                now_dt = datetime.now()
+                                item = {
+                                    'student_id': sid,
+                                    'name': name,
+                                    'confidence': round(float(conf) * 100.0, 2),
+                                    'date': now_dt.strftime('%Y-%m-%d'),
+                                    'time': now_dt.strftime('%H:%M:%S')
+                                }
+                                try:
+                                    if self.queue.full():
+                                        _ = self.queue.get_nowait()
+                                    self.queue.put_nowait(item)
+                                except Exception:
+                                    pass
+                                self.system.draw_face_box_with_name(img, (x1, y1, x2, y2), name, conf, True)
+                            else:
+                                self.system.draw_face_box_with_name(img, (x1, y1, x2, y2), "Unknown", conf if 'conf' in locals() else 0.0, False)
+                        except Exception:
+                            # If recognition fails, just draw unknown face
+                            self.system.draw_face_box_with_name(img, (x1, y1, x2, y2), "Unknown", 0.0, False)
+                    else:
+                        # No embedding available, draw unknown face
+                        self.system.draw_face_box_with_name(img, (x1, y1, x2, y2), "Unknown", 0.0, False)
+                
+                self.last_ts = now
+            except Exception as e:
+                # If anything fails, just return the frame without processing
+                print(f"Face processing error: {e}")
+                pass
+        
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
@@ -178,34 +221,61 @@ class AddStudentProcessor(VideoProcessorBase):
     def __init__(self):
         self.system = get_system()
         self.queue = Queue(maxsize=1)
+        self.frame_skip = 3  # Process every 3rd frame to reduce load
+        self.frame_count = 0
+        self.max_processing_time = 0.15  # Max time per frame
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        start_time = time.time()
         img = frame.to_ndarray(format="bgr24")
-        faces = self.system.detect_faces(img)
-        best = None
-        area_best = 0
-        for f in faces:
-            x1, y1, x2, y2 = f['bbox']
-            area = max(0, x2 - x1) * max(0, y2 - y1)
-            if area > area_best:
-                area_best = area
-                best = f
-        if best is not None:
-            x1, y1, x2, y2 = best['bbox']
-            emb = best.get('embedding')
-            if emb is None:
-                face_img = img[y1:y2, x1:x2]
-                if face_img.size > 0:
-                    emb = self.system.extract_embedding(face_img)
-            if emb is not None:
-                try:
-                    if self.queue.full():
-                        _ = self.queue.get_nowait()
-                    self.queue.put_nowait({'embedding': emb})
-                except Exception:
-                    pass
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(img, "Align face and hold", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        # Skip frames to reduce processing load
+        self.frame_count += 1
+        if self.frame_count % self.frame_skip != 0:
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+        
+        try:
+            faces = self.system.detect_faces(img)
+            best = None
+            area_best = 0
+            
+            for f in faces:
+                # Check timeout
+                if time.time() - start_time > self.max_processing_time:
+                    break
+                    
+                x1, y1, x2, y2 = f['bbox']
+                area = max(0, x2 - x1) * max(0, y2 - y1)
+                if area > area_best:
+                    area_best = area
+                    best = f
+            
+            if best is not None:
+                x1, y1, x2, y2 = best['bbox']
+                emb = best.get('embedding')
+                
+                if emb is None:
+                    face_img = img[y1:y2, x1:x2]
+                    if face_img.size > 0:
+                        try:
+                            emb = self.system.extract_embedding(face_img)
+                        except Exception:
+                            emb = None
+                
+                if emb is not None:
+                    try:
+                        if self.queue.full():
+                            _ = self.queue.get_nowait()
+                        self.queue.put_nowait({'embedding': emb})
+                    except Exception:
+                        pass
+                
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(img, "Align face and hold", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        except Exception as e:
+            print(f"Add student processing error: {e}")
+            pass
+            
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
@@ -394,9 +464,9 @@ def page_take():
             st.session_state.page = 'home'
             st.rerun()
 
-        # Periodically rerun to poll results from the background processor
+        # Periodically rerun to poll results from the background processor (reduced frequency)
         if live_refresh and ctx and ctx.state.playing:
-            time.sleep(0.5)
+            time.sleep(1.0)  # Increased sleep time to reduce CPU usage
             st.rerun()
 
 

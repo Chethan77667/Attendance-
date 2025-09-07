@@ -84,52 +84,88 @@ class DeepFaceAttendance:
             json.dump(self.embeddings, f, indent=2)
 
     def detect_faces(self, frame):
-        """Detect faces using InsightFace or OpenCV"""
+        """Detect faces using InsightFace or OpenCV with timeout protection"""
         faces = []
         
-        # Try InsightFace first
+        # Try InsightFace first (with timeout protection)
         if self.face_analyzer:
             try:
-                insight_faces = self.face_analyzer.get(frame)
-                for face in insight_faces:
-                    bbox = face.bbox.astype(int)
-                    faces.append({
-                        'bbox': bbox,
-                        'embedding': face.embedding,
-                        'confidence': face.det_score
-                    })
-            except:
+                # Add timeout protection for InsightFace
+                import signal
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("InsightFace detection timeout")
+                
+                # Set timeout for InsightFace (only on Unix systems)
+                if hasattr(signal, 'SIGALRM'):
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(1)  # 1 second timeout
+                
+                try:
+                    insight_faces = self.face_analyzer.get(frame)
+                    for face in insight_faces:
+                        bbox = face.bbox.astype(int)
+                        faces.append({
+                            'bbox': bbox,
+                            'embedding': face.embedding,
+                            'confidence': face.det_score
+                        })
+                finally:
+                    if hasattr(signal, 'SIGALRM'):
+                        signal.alarm(0)  # Cancel timeout
+                        
+            except (TimeoutError, Exception) as e:
+                # If InsightFace fails or times out, fall back to OpenCV
                 pass
         
-        # Fallback to OpenCV
+        # Fallback to OpenCV (always reliable and fast)
         if not faces:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            opencv_faces = self.face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
-            
-            for (x, y, w, h) in opencv_faces:
-                faces.append({
-                    'bbox': [x, y, x+w, y+h],
-                    'embedding': None,
-                    'confidence': 0.8
-                })
+            try:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                opencv_faces = self.face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
+                
+                for (x, y, w, h) in opencv_faces:
+                    faces.append({
+                        'bbox': [x, y, x+w, y+h],
+                        'embedding': None,
+                        'confidence': 0.8
+                    })
+            except Exception:
+                pass
         
         return faces
 
     def extract_embedding(self, face_img):
-        """Extract embedding using InsightFace or OpenCV fallback"""
-        # Try InsightFace first if available
+        """Extract embedding using InsightFace or OpenCV fallback with timeout protection"""
+        # Try InsightFace first if available (with timeout)
         if self.face_analyzer:
             try:
-                # Resize for InsightFace
-                face_resized = cv2.resize(face_img, (112, 112))
-                faces = self.face_analyzer.get(face_resized)
+                import signal
                 
-                if faces and hasattr(faces[0], 'embedding'):
-                    return faces[0].embedding
-            except:
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("InsightFace embedding timeout")
+                
+                # Set timeout for InsightFace (only on Unix systems)
+                if hasattr(signal, 'SIGALRM'):
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(1)  # 1 second timeout
+                
+                try:
+                    # Resize for InsightFace
+                    face_resized = cv2.resize(face_img, (112, 112))
+                    faces = self.face_analyzer.get(face_resized)
+                    
+                    if faces and hasattr(faces[0], 'embedding'):
+                        return faces[0].embedding
+                finally:
+                    if hasattr(signal, 'SIGALRM'):
+                        signal.alarm(0)  # Cancel timeout
+                        
+            except (TimeoutError, Exception):
+                # If InsightFace fails or times out, fall back to OpenCV
                 pass
         
-        # Fallback to simple OpenCV embedding
+        # Fallback to simple OpenCV embedding (always fast and reliable)
         try:
             # Resize to standard size
             face_resized = cv2.resize(face_img, (64, 64))
